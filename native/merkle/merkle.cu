@@ -277,6 +277,9 @@ void fill_digests_buf_linear_gpu_with_gpu_ptr(
     default:
         break;
     }
+    // Synchronize to ensure all kernels complete before returning
+    // This prevents use-after-free when caller drops GPU memory
+    cudaDeviceSynchronize();
 }
 
 // The provided pointers need to be on GPU 0
@@ -496,4 +499,7 @@ void fill_digests_buf_linear_multigpu_with_gpu_ptr(
     default:
         break;
     }
+    // Synchronize to ensure all kernels complete before returning
+    // This prevents use-after-free when caller drops GPU memory
+    cudaDeviceSynchronize();
 }
