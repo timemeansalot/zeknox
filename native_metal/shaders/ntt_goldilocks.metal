@@ -433,7 +433,10 @@ kernel void ntt_butterfly_simdgroup_batch(
         ulong w = twiddles[twiddle_idx];
 
         uint partner = tid ^ stride;
-        ulong other = simd_shuffle(val, partner);
+        ushort partner_lane = (ushort)partner;
+        uint2 val_u2 = uint2((uint)val, (uint)(val >> 32));
+        uint2 other_u2 = simd_shuffle(val_u2, partner_lane);
+        ulong other = (ulong)other_u2.x | (ulong(other_u2.y) << 32);
         ulong t = gl_mul(other, w);
         if ((tid & stride) == 0) {
             val = gl_add(val, t);
@@ -548,7 +551,10 @@ kernel void intt_butterfly_simdgroup_batch(
         ulong w = inv_twiddles[twiddle_idx];
 
         uint partner = tid ^ stride;
-        ulong other = simd_shuffle(val, partner);
+        ushort partner_lane = (ushort)partner;
+        uint2 val_u2 = uint2((uint)val, (uint)(val >> 32));
+        uint2 other_u2 = simd_shuffle(val_u2, partner_lane);
+        ulong other = (ulong)other_u2.x | (ulong(other_u2.y) << 32);
         ulong t = gl_mul(other, w);
         if ((tid & stride) == 0) {
             val = gl_add(val, t);
