@@ -106,7 +106,6 @@ struct MetalRuntime {
     id<MTLComputePipelineState> f_ntt_butterfly_batch;
     id<MTLComputePipelineState> f_ntt_butterfly_simdgroup_batch;
     id<MTLComputePipelineState> f_ntt_butterfly_shared_batch;
-    id<MTLComputePipelineState> f_ntt_template_shared_batch;
     id<MTLComputePipelineState> f_intt_butterfly_batch;
     id<MTLComputePipelineState> f_intt_butterfly_simdgroup_batch;
     id<MTLComputePipelineState> f_ntt_scale_batch;
@@ -207,7 +206,6 @@ static void ensure_runtime() {
             id<MTLFunction> f_ntt_butterfly_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_batch"];
             id<MTLFunction> f_ntt_butterfly_simdgroup_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_simdgroup_batch"];
             id<MTLFunction> f_ntt_butterfly_shared_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_shared_batch"];
-            id<MTLFunction> f_ntt_template_shared_batch = [g_runtime.library newFunctionWithName:@"ntt_template_kernel_shared_batch"];
             id<MTLFunction> f_intt_butterfly_batch = [g_runtime.library newFunctionWithName:@"intt_butterfly_batch"];
             id<MTLFunction> f_intt_butterfly_simdgroup_batch = [g_runtime.library newFunctionWithName:@"intt_butterfly_simdgroup_batch"];
             id<MTLFunction> f_ntt_scale_batch = [g_runtime.library newFunctionWithName:@"ntt_scale_batch"];
@@ -249,7 +247,7 @@ static void ensure_runtime() {
 
             if (!f_ntt_bit_reverse || !f_ntt_butterfly || !f_ntt_butterfly_shared || !f_intt_butterfly || !f_ntt_scale ||
                 !f_ntt_bit_reverse_batch || !f_ntt_bit_reverse_coset_batch || !f_ntt_butterfly_batch || !f_ntt_butterfly_simdgroup_batch ||
-                !f_ntt_butterfly_shared_batch || !f_ntt_template_shared_batch || !f_intt_butterfly_batch || !f_intt_butterfly_simdgroup_batch || !f_ntt_scale_batch ||
+                !f_ntt_butterfly_shared_batch || !f_intt_butterfly_batch || !f_intt_butterfly_simdgroup_batch || !f_ntt_scale_batch ||
                 !f_ntt_scale_coset_batch || !f_extend_inputs_batch || !f_extend_inputs_coset_batch ||
                 !f_batch_vector_mult || !f_transpose_rev) {
                 std::fprintf(stderr, "zeknox metal: missing required NTT shader functions\n");
@@ -304,11 +302,6 @@ static void ensure_runtime() {
             g_runtime.f_ntt_butterfly_shared_batch = [g_runtime.device newComputePipelineStateWithFunction:f_ntt_butterfly_shared_batch error:&err];
             if (!g_runtime.f_ntt_butterfly_shared_batch) {
                 std::fprintf(stderr, "zeknox metal: failed to create pipeline (ntt_butterfly_shared_batch): %s\n", [[err localizedDescription] UTF8String]);
-                std::abort();
-            }
-            g_runtime.f_ntt_template_shared_batch = [g_runtime.device newComputePipelineStateWithFunction:f_ntt_template_shared_batch error:&err];
-            if (!g_runtime.f_ntt_template_shared_batch) {
-                std::fprintf(stderr, "zeknox metal: failed to create pipeline (ntt_template_shared_batch): %s\n", [[err localizedDescription] UTF8String]);
                 std::abort();
             }
             g_runtime.f_intt_butterfly_batch = [g_runtime.device newComputePipelineStateWithFunction:f_intt_butterfly_batch error:&err];
@@ -698,8 +691,6 @@ static void encode_ntt_batched(id<MTLCommandBuffer> command_buffer,
 
     const char *env_simd = std::getenv("METAL_NTT_SIMDGROUP");
     const bool use_simd = env_simd && env_simd[0] != '\0';
-    const char *env_cuda_like = std::getenv("METAL_NTT_CUDA_LIKE");
-    const bool use_cuda_like = env_cuda_like && env_cuda_like[0] != '\0';
     if (log_shared > 0) {
         NTTBatchUniforms uniforms{};
         uniforms.n = n;
@@ -712,56 +703,7 @@ static void encode_ntt_batched(id<MTLCommandBuffer> command_buffer,
 
         uint32_t stage_offset = 0;
         uint32_t stage_count = log_shared;
-        if (use_cuda_like && !inverse) {
-            uint32_t threads = 256;
-            const char *env_threads = std::getenv("METAL_NTT_CUDA_THREADS");
-            if (env_threads && env_threads[0] != '\0') {
-                int v = std::atoi(env_threads);
-                if (v > 0) {
-                    threads = static_cast<uint32_t>(v);
-                }
-            }
-            uint32_t max_threads = (uint32_t)g_runtime.f_ntt_template_shared_batch.maxTotalThreadsPerThreadgroup;
-            if (threads > max_threads) {
-                threads = max_threads;
-            }
-            // ensure power-of-two
-            uint32_t pow2 = 1;
-            while (pow2 * 2 <= threads) {
-                pow2 *= 2;
-            }
-            threads = pow2;
-            uint32_t block_size = threads * 2;
-            uint32_t stage_cuda = 0;
-            while ((1U << stage_cuda) < block_size) {
-                stage_cuda++;
-            }
-            if (stage_cuda > log_shared) {
-                stage_cuda = log_shared;
-            }
-            stage_count = stage_cuda;
-            block_size = 1U << stage_cuda;
-            uint32_t blocks_per_batch = n / block_size;
-            uint32_t total_tasks = blocks_per_batch * batches;
-
-            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-            [encoder setComputePipelineState:g_runtime.f_ntt_template_shared_batch];
-            [encoder setBuffer:data_buf offset:0 atIndex:0];
-            [encoder setBuffer:twiddles offset:0 atIndex:1];
-            [encoder setBytes:&uniforms length:sizeof(NTTBatchUniforms) atIndex:2];
-            [encoder setBytes:&stage_offset length:sizeof(uint32_t) atIndex:3];
-            [encoder setBytes:&stage_count length:sizeof(uint32_t) atIndex:4];
-            [encoder setBytes:&total_tasks length:sizeof(uint32_t) atIndex:5];
-            [encoder setBytes:&block_size length:sizeof(uint32_t) atIndex:6];
-
-            MTLSize tg = MTLSizeMake(threads, 1, 1);
-            MTLSize ng = MTLSizeMake(total_tasks, 1, 1);
-            [encoder dispatchThreadgroups:ng threadsPerThreadgroup:tg];
-            [encoder endEncoding];
-
-            stage_offset = stage_count;
-            stage_count = log_shared - stage_offset;
-        } else if (use_simd && log_shared >= 5) {
+        if (use_simd && log_shared >= 5) {
             stage_count = 5;
             const uint32_t block_size = 1U << stage_count;
             const uint32_t blocks_per_batch = n / block_size;

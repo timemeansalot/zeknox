@@ -450,58 +450,6 @@ kernel void ntt_butterfly_simdgroup_batch(
 }
 
 // CUDA-like shared-memory NTT for early stages (batched).
-kernel void ntt_template_kernel_shared_batch(
-    device ulong * data[[buffer(0)]],
-    constant ulong * twiddles[[buffer(1)]],
-    constant NTTBatchUniforms & uniforms[[buffer(2)]],
-    constant uint & stage_offset[[buffer(3)]],
-    constant uint & stage_count[[buffer(4)]],
-    constant uint & total_tasks[[buffer(5)]],
-    constant uint & block_size[[buffer(6)]],
-    uint tid[[thread_position_in_threadgroup]],
-    uint tgid[[threadgroup_position_in_grid]]
-) {
-    if (tgid >= total_tasks) {
-        return;
-    }
-
-    const uint threads = block_size >> 1;
-    if (tid >= threads) {
-        return;
-    }
-
-    threadgroup ulong shared_data[2048];
-    const uint offset = tgid * block_size;
-
-    for (uint s = 0; s < stage_count; s++) {
-        uint stage = stage_offset + s;
-        uint stride = 1u << stage;
-        uint m = 1u << (stage + 1);
-
-        uint l = tid;
-        uint j = l & (stride - 1);
-        uint i = ((l >> stage) * m) & (block_size - 1);
-        uint oij = i + j;
-        uint k = oij + stride;
-
-        uint twiddle_idx = j * (uniforms.n / m) * uniforms.twiddle_stride;
-        ulong w = twiddles[twiddle_idx];
-
-        ulong u = (s == 0) ? data[offset + oij] : shared_data[oij];
-        ulong v = (s == 0) ? data[offset + k] : shared_data[k];
-        v = gl_mul(v, w);
-
-        if (s + 1 == stage_count) {
-            data[offset + oij] = gl_add(u, v);
-            data[offset + k] = gl_sub(u, v);
-        } else {
-            shared_data[oij] = gl_add(u, v);
-            shared_data[k] = gl_sub(u, v);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-}
-
 // INTT (Inverse NTT) butterfly kernel
 // Same as NTT but uses inverse twiddle factors
 kernel void intt_butterfly(
