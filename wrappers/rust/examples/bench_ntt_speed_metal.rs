@@ -36,6 +36,8 @@ fn main() {
         cpu_buffer.extend(input.iter());
     }
 
+    let sweep_env = std::env::var("METAL_NTT_LOG_SHARED_SWEEP").ok();
+
     let mut gpu_buffer = cpu_buffer.clone();
 
     init_twiddle_factors_rs(0, log_n);
@@ -45,16 +47,41 @@ fn main() {
     cfg.are_inputs_on_device = false;
     cfg.are_outputs_on_device = false;
 
-    for _ in 0..warmup {
-        ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
-    }
+    let mut run_gpu = || -> f64 {
+        for _ in 0..warmup {
+            ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
+        }
 
-    let mut gpu_total = 0.0f64;
-    for _ in 0..runs {
-        let start = Instant::now();
-        ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
-        gpu_total += start.elapsed().as_secs_f64() * 1000.0;
-    }
+        let mut gpu_total = 0.0f64;
+        for _ in 0..runs {
+            let start = Instant::now();
+            ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
+            gpu_total += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        gpu_total / runs as f64
+    };
+
+    let gpu_avg = if let Some(list) = sweep_env {
+        let mut best = None;
+        for entry in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            std::env::set_var("METAL_NTT_LOG_SHARED", entry);
+            let avg = run_gpu();
+            println!("METAL_NTT_LOG_SHARED={entry} -> {avg:.3} ms");
+            match best {
+                None => best = Some((entry.to_string(), avg)),
+                Some((_, best_avg)) if avg < best_avg => best = Some((entry.to_string(), avg)),
+                _ => {}
+            }
+        }
+        if let Some((best_log, best_avg)) = best {
+            println!("Best METAL_NTT_LOG_SHARED={best_log} avg={best_avg:.3} ms");
+            best_avg
+        } else {
+            run_gpu()
+        }
+    } else {
+        run_gpu()
+    };
 
     let mut cpu_total = 0.0f64;
     for _ in 0..runs {
@@ -75,10 +102,10 @@ fn main() {
         cpu_total += start.elapsed().as_secs_f64() * 1000.0;
     }
 
-    println!("GPU NTT avg over {} runs: {:.3} ms", runs, gpu_total / runs as f64);
+    println!("GPU NTT avg over {} runs: {:.3} ms", runs, gpu_avg);
     println!("CPU NTT avg over {} runs: {:.3} ms", runs, cpu_total / runs as f64);
     println!(
         "Speedup: {:.2}x",
-        (cpu_total / runs as f64) / (gpu_total / runs as f64)
+        (cpu_total / runs as f64) / gpu_avg
     );
 }
