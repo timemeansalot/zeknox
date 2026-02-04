@@ -104,8 +104,10 @@ struct MetalRuntime {
     id<MTLComputePipelineState> f_ntt_bit_reverse_batch;
     id<MTLComputePipelineState> f_ntt_bit_reverse_coset_batch;
     id<MTLComputePipelineState> f_ntt_butterfly_batch;
+    id<MTLComputePipelineState> f_ntt_butterfly_simdgroup_batch;
     id<MTLComputePipelineState> f_ntt_butterfly_shared_batch;
     id<MTLComputePipelineState> f_intt_butterfly_batch;
+    id<MTLComputePipelineState> f_intt_butterfly_simdgroup_batch;
     id<MTLComputePipelineState> f_ntt_scale_batch;
     id<MTLComputePipelineState> f_ntt_scale_coset_batch;
     id<MTLComputePipelineState> f_extend_inputs_batch;
@@ -202,8 +204,10 @@ static void ensure_runtime() {
             id<MTLFunction> f_ntt_bit_reverse_batch = [g_runtime.library newFunctionWithName:@"ntt_bit_reverse_batch"];
             id<MTLFunction> f_ntt_bit_reverse_coset_batch = [g_runtime.library newFunctionWithName:@"ntt_bit_reverse_coset_batch"];
             id<MTLFunction> f_ntt_butterfly_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_batch"];
+            id<MTLFunction> f_ntt_butterfly_simdgroup_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_simdgroup_batch"];
             id<MTLFunction> f_ntt_butterfly_shared_batch = [g_runtime.library newFunctionWithName:@"ntt_butterfly_shared_batch"];
             id<MTLFunction> f_intt_butterfly_batch = [g_runtime.library newFunctionWithName:@"intt_butterfly_batch"];
+            id<MTLFunction> f_intt_butterfly_simdgroup_batch = [g_runtime.library newFunctionWithName:@"intt_butterfly_simdgroup_batch"];
             id<MTLFunction> f_ntt_scale_batch = [g_runtime.library newFunctionWithName:@"ntt_scale_batch"];
             id<MTLFunction> f_ntt_scale_coset_batch = [g_runtime.library newFunctionWithName:@"ntt_scale_coset_batch"];
             id<MTLFunction> f_extend_inputs_batch = [g_runtime.library newFunctionWithName:@"extend_inputs_batch"];
@@ -242,8 +246,9 @@ static void ensure_runtime() {
             }
 
             if (!f_ntt_bit_reverse || !f_ntt_butterfly || !f_ntt_butterfly_shared || !f_intt_butterfly || !f_ntt_scale ||
-                !f_ntt_bit_reverse_batch || !f_ntt_bit_reverse_coset_batch || !f_ntt_butterfly_batch || !f_ntt_butterfly_shared_batch ||
-                !f_intt_butterfly_batch || !f_ntt_scale_batch || !f_ntt_scale_coset_batch || !f_extend_inputs_batch || !f_extend_inputs_coset_batch ||
+                !f_ntt_bit_reverse_batch || !f_ntt_bit_reverse_coset_batch || !f_ntt_butterfly_batch || !f_ntt_butterfly_simdgroup_batch ||
+                !f_ntt_butterfly_shared_batch || !f_intt_butterfly_batch || !f_intt_butterfly_simdgroup_batch || !f_ntt_scale_batch ||
+                !f_ntt_scale_coset_batch || !f_extend_inputs_batch || !f_extend_inputs_coset_batch ||
                 !f_batch_vector_mult || !f_transpose_rev) {
                 std::fprintf(stderr, "zeknox metal: missing required NTT shader functions\n");
                 std::abort();
@@ -289,6 +294,11 @@ static void ensure_runtime() {
                 std::fprintf(stderr, "zeknox metal: failed to create pipeline (ntt_butterfly_batch): %s\n", [[err localizedDescription] UTF8String]);
                 std::abort();
             }
+            g_runtime.f_ntt_butterfly_simdgroup_batch = [g_runtime.device newComputePipelineStateWithFunction:f_ntt_butterfly_simdgroup_batch error:&err];
+            if (!g_runtime.f_ntt_butterfly_simdgroup_batch) {
+                std::fprintf(stderr, "zeknox metal: failed to create pipeline (ntt_butterfly_simdgroup_batch): %s\n", [[err localizedDescription] UTF8String]);
+                std::abort();
+            }
             g_runtime.f_ntt_butterfly_shared_batch = [g_runtime.device newComputePipelineStateWithFunction:f_ntt_butterfly_shared_batch error:&err];
             if (!g_runtime.f_ntt_butterfly_shared_batch) {
                 std::fprintf(stderr, "zeknox metal: failed to create pipeline (ntt_butterfly_shared_batch): %s\n", [[err localizedDescription] UTF8String]);
@@ -297,6 +307,11 @@ static void ensure_runtime() {
             g_runtime.f_intt_butterfly_batch = [g_runtime.device newComputePipelineStateWithFunction:f_intt_butterfly_batch error:&err];
             if (!g_runtime.f_intt_butterfly_batch) {
                 std::fprintf(stderr, "zeknox metal: failed to create pipeline (intt_butterfly_batch): %s\n", [[err localizedDescription] UTF8String]);
+                std::abort();
+            }
+            g_runtime.f_intt_butterfly_simdgroup_batch = [g_runtime.device newComputePipelineStateWithFunction:f_intt_butterfly_simdgroup_batch error:&err];
+            if (!g_runtime.f_intt_butterfly_simdgroup_batch) {
+                std::fprintf(stderr, "zeknox metal: failed to create pipeline (intt_butterfly_simdgroup_batch): %s\n", [[err localizedDescription] UTF8String]);
                 std::abort();
             }
             g_runtime.f_ntt_scale_batch = [g_runtime.device newComputePipelineStateWithFunction:f_ntt_scale_batch error:&err];
@@ -674,6 +689,8 @@ static void encode_ntt_batched(id<MTLCommandBuffer> command_buffer,
         std::fprintf(stderr, "zeknox metal: log_shared=%u log_n=%u\n", log_shared, log_n);
     }
 
+    const char *env_simd = std::getenv("METAL_NTT_SIMDGROUP");
+    const bool use_simd = env_simd && env_simd[0] != '\0';
     if (log_shared > 0) {
         NTTBatchUniforms uniforms{};
         uniforms.n = n;
@@ -684,22 +701,45 @@ static void encode_ntt_batched(id<MTLCommandBuffer> command_buffer,
         uniforms.batches = batches;
         uniforms.batch_stride = n;
 
-        const uint32_t stage_offset = 0;
-        const uint32_t stage_count = log_shared;
-        const uint32_t block_size = 1U << log_shared;
-        const uint32_t blocks_per_batch = n / block_size;
-        const uint32_t num_groups = blocks_per_batch * batches;
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        [encoder setComputePipelineState:g_runtime.f_ntt_butterfly_shared_batch];
-        [encoder setBuffer:data_buf offset:0 atIndex:0];
-        [encoder setBuffer:twiddles offset:0 atIndex:1];
-        [encoder setBytes:&uniforms length:sizeof(NTTBatchUniforms) atIndex:2];
-        [encoder setBytes:&stage_offset length:sizeof(uint32_t) atIndex:3];
-        [encoder setBytes:&stage_count length:sizeof(uint32_t) atIndex:4];
-        MTLSize tg = MTLSizeMake(block_size, 1, 1);
-        MTLSize ng = MTLSizeMake(num_groups, 1, 1);
-        [encoder dispatchThreadgroups:ng threadsPerThreadgroup:tg];
-        [encoder endEncoding];
+        uint32_t stage_offset = 0;
+        uint32_t stage_count = log_shared;
+        if (use_simd && log_shared >= 5) {
+            stage_count = 5;
+            const uint32_t block_size = 1U << stage_count;
+            const uint32_t blocks_per_batch = n / block_size;
+            const uint32_t num_groups = blocks_per_batch * batches;
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            [encoder setComputePipelineState:inverse ? g_runtime.f_intt_butterfly_simdgroup_batch
+                                                    : g_runtime.f_ntt_butterfly_simdgroup_batch];
+            [encoder setBuffer:data_buf offset:0 atIndex:0];
+            [encoder setBuffer:twiddles offset:0 atIndex:1];
+            [encoder setBytes:&uniforms length:sizeof(NTTBatchUniforms) atIndex:2];
+            [encoder setBytes:&stage_offset length:sizeof(uint32_t) atIndex:3];
+            [encoder setBytes:&stage_count length:sizeof(uint32_t) atIndex:4];
+            MTLSize tg = MTLSizeMake(block_size, 1, 1);
+            MTLSize ng = MTLSizeMake(num_groups, 1, 1);
+            [encoder dispatchThreadgroups:ng threadsPerThreadgroup:tg];
+            [encoder endEncoding];
+
+            stage_offset = stage_count;
+            stage_count = log_shared - stage_offset;
+        }
+        if (stage_count > 0) {
+            const uint32_t block_size = 1U << stage_count;
+            const uint32_t blocks_per_batch = n / block_size;
+            const uint32_t num_groups = blocks_per_batch * batches;
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            [encoder setComputePipelineState:g_runtime.f_ntt_butterfly_shared_batch];
+            [encoder setBuffer:data_buf offset:0 atIndex:0];
+            [encoder setBuffer:twiddles offset:0 atIndex:1];
+            [encoder setBytes:&uniforms length:sizeof(NTTBatchUniforms) atIndex:2];
+            [encoder setBytes:&stage_offset length:sizeof(uint32_t) atIndex:3];
+            [encoder setBytes:&stage_count length:sizeof(uint32_t) atIndex:4];
+            MTLSize tg = MTLSizeMake(block_size, 1, 1);
+            MTLSize ng = MTLSizeMake(num_groups, 1, 1);
+            [encoder dispatchThreadgroups:ng threadsPerThreadgroup:tg];
+            [encoder endEncoding];
+        }
     }
 
     for (uint32_t stage = log_shared; stage < log_n; stage++) {
