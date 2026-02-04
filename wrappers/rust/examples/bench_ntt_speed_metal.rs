@@ -10,7 +10,7 @@ use plonky2_field::{
 };
 use rand::random;
 use std::time::Instant;
-use zeknox::{init_twiddle_factors_rs, ntt_batch, types::NTTConfig};
+use zeknox::{init_twiddle_factors_rs, ntt_batch, ntt_batch_repeats, types::NTTConfig};
 
 fn random_fr() -> u64 {
     let fr: u64 = random();
@@ -37,6 +37,7 @@ fn main() {
     }
 
     let sweep_env = std::env::var("METAL_NTT_LOG_SHARED_SWEEP").ok();
+    let batch_runs_env = std::env::var("METAL_NTT_BATCH_RUNS").ok();
 
     let mut gpu_buffer = cpu_buffer.clone();
 
@@ -48,6 +49,18 @@ fn main() {
     cfg.are_outputs_on_device = false;
 
     let mut run_gpu = || -> f64 {
+        let batch_runs: usize = batch_runs_env
+            .as_deref()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(1);
+
+        if batch_runs > 1 {
+            std::env::set_var("METAL_LDE_BATCH_RUNS", batch_runs.to_string());
+        } else {
+            std::env::remove_var("METAL_LDE_BATCH_RUNS");
+        }
+
         for _ in 0..warmup {
             ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
         }
@@ -55,8 +68,13 @@ fn main() {
         let mut gpu_total = 0.0f64;
         for _ in 0..runs {
             let start = Instant::now();
-            ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
-            gpu_total += start.elapsed().as_secs_f64() * 1000.0;
+            if batch_runs == 1 {
+                ntt_batch(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone());
+            } else {
+                ntt_batch_repeats(0, gpu_buffer.as_mut_ptr(), log_n, cfg.clone(), batch_runs as u32);
+            }
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            gpu_total += elapsed_ms / batch_runs as f64;
         }
         gpu_total / runs as f64
     };

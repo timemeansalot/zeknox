@@ -29,6 +29,15 @@ extern "C" {
         cfg: types::NTTConfig,
     ) -> error::Error;
 
+    fn compute_batched_ntt_repeats(
+        device_id: usize,
+        inout: *mut core::ffi::c_void,
+        lg_domain_size: usize,
+        ntt_direction: types::NTTDirection,
+        cfg: types::NTTConfig,
+        repeats: u32,
+    ) -> error::Error;
+
     fn compute_batched_lde(
         device_id: usize,
         output: *mut core::ffi::c_void,
@@ -61,6 +70,19 @@ extern "C" {
         digests_buf_gpu_ptr: *mut ::std::os::raw::c_void,
         cap_buf_gpu_ptr: *mut ::std::os::raw::c_void,
         leaves_buf_gpu_ptr: *mut ::std::os::raw::c_void,
+        digests_buf_size: u64,
+        cap_buf_size: u64,
+        leaves_buf_size: u64,
+        leaf_size: u64,
+        cap_height: u64,
+        hash_type: u64,
+        gpu_id: u64,
+    );
+
+    pub fn fill_digests_buf_linear_gpu_with_gpu_ptr_transpose_rev(
+        digests_buf_gpu_ptr: *mut ::std::os::raw::c_void,
+        cap_buf_gpu_ptr: *mut ::std::os::raw::c_void,
+        lde_buf_gpu_ptr: *mut ::std::os::raw::c_void,
         digests_buf_size: u64,
         cap_buf_size: u64,
         leaves_buf_size: u64,
@@ -176,6 +198,29 @@ pub fn ntt_batch<T>(
             log_n_size,
             types::NTTDirection::Forward,
             cfg,
+        )
+    };
+
+    if err.code != 0 {
+        panic!("{}", String::from(err));
+    }
+}
+
+pub fn ntt_batch_repeats<T>(
+    device_id: usize,
+    inout: *mut T,
+    log_n_size: usize,
+    cfg: NTTConfig,
+    repeats: u32,
+) {
+    let err = unsafe {
+        compute_batched_ntt_repeats(
+            device_id,
+            inout as *mut core::ffi::c_void,
+            log_n_size,
+            types::NTTDirection::Forward,
+            cfg,
+            repeats,
         )
     };
 
